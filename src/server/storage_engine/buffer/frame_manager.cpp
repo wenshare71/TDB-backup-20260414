@@ -46,9 +46,47 @@ Frame *FrameManager::get(int file_desc, PageNum page_num) {
 /**
  * TODO [Lab1] 需要同学们实现页帧驱逐
  */
-int FrameManager::evict_frames(int count, std::function<RC(Frame *frame)> evict_action) {
-  return 0;
+
+int FrameManager::evict_frames(int count, std::function<RC(Frame *frame)> evict_action)
+{
+  // 第一步：持锁，从 LRU 尾部收集 pin_count==0 的候选 frame，并将其 pin 住
+  std::list<Frame *> evict_list;
+  {
+    std::lock_guard<std::mutex> lock_guard(lock_);
+    auto collector = [&evict_list, &count](const FrameId &frame_id, Frame *const frame) -> bool {
+      if (frame->can_evict()) {  // pin_count == 0
+        frame->pin();            // pin 住，防止释放锁后被别人使用
+        evict_list.push_back(frame);
+        if ((int)evict_list.size() >= count) {
+          return false;          // 收够了，停止遍历
+        }
+      }
+      return true;
+    };
+    frames_.foreach_reverse(collector);
+  }
+  // 锁已释放
+
+  // 第二步：对每个候选，先执行 evict_action（刷盘），再 free
+  int evicted = 0;
+  for (Frame *frame : evict_list) {
+    RC rc = evict_action(frame);
+    if (rc != RC::SUCCESS) {
+      // 刷盘失败，不能驱逐，unpin 恢复并跳过
+      frame->unpin();
+      continue;
+    }
+
+    // free_internal 内部会加锁，所以这里不能持锁调它
+    FrameId frame_id(frame->file_desc(), frame->page_num());
+    std::lock_guard<std::mutex> lock_guard(lock_);
+    free_internal(frame_id, frame);  // free_internal 断言 pin_count==1，此时满足
+    evicted++;
+  }
+
+  return evicted;
 }
+
 
 Frame *FrameManager::get_internal(const FrameId &frame_id) {
   Frame *frame = nullptr;

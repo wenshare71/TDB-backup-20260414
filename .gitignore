@@ -6,3 +6,9 @@
 /build_debug
 /cmake-build-debug
 /local
+/my
+CLAUDE.md
+
+/.github
+/lab*
+*.zip

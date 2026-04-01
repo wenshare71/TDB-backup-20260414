@@ -208,6 +208,24 @@ RC FileBufferPool::flush_page_internal(Frame &frame) {
   //  3. 写入数据到文件的目标位置
   //  4. 清除frame的脏标记
   //  5. 记录和返回成功
+  Page &page = frame.page();
+  PageNum page_num = frame.page_num();
+
+  int64_t offset = (int64_t)page_num * BP_PAGE_SIZE; // 计算页面在文件中的偏移量
+  if (lseek(file_desc_, offset, SEEK_SET) == -1){
+    LOG_ERROR("Failed to flush page %s:%d, lseek failed: %s",
+              file_name_.c_str(), page_num, strerror(errno));
+    return RC::IOERR_SEEK;
+  }
+
+  if(writen(file_desc_, &page, BP_PAGE_SIZE)!=0){
+    LOG_ERROR("Failed to flush page %s:%d, writen failed: %s",
+              file_name_.c_str(), page_num, strerror(errno));
+    return RC::IOERR_WRITE;
+  }
+
+  frame.clear_dirty();
+  LOG_DEBUG("Flush page successfully");
   return RC::SUCCESS;
 }
 
@@ -233,13 +251,41 @@ RC FileBufferPool::flush_all_pages() {
 /**
  * TODO [Lab1] 需要同学们实现某个指定页面的驱逐
  */
+
+// evict_page用于分配了frame但未成功加载数据的页面的清理，或者是被动驱逐时的页面清理
 RC FileBufferPool::evict_page(PageNum page_num, Frame *buf) {
+  RC rc = RC::SUCCESS;
+  if (buf->dirty()) {
+    if (buf->file_desc() == file_desc_) {
+      rc = this->flush_page_internal(*buf);
+    } else {
+      rc = bp_manager_.flush_page(*buf);
+    }
+    if (rc != RC::SUCCESS) {
+      LOG_ERROR("Failed to evict page %s:%d, due to failed to flush old page. rc=%s", file_name_.c_str(), page_num, strrc(rc));
+    }
+  }
+  frame_manager_.free(file_desc_, page_num, buf);
   return RC::SUCCESS;
 }
 /**
  * TODO [Lab1] 需要同学们实现该文件所有页面的驱逐
  */
 RC FileBufferPool::evict_all_pages() {
+  RC rc = RC::SUCCESS;
+  for (Frame *frame : frame_manager_.find_list(file_desc_)) {
+    if (frame->dirty()) {
+      if (frame->file_desc() == file_desc_) {
+        rc = this->flush_page_internal(*frame);
+      } else {
+        rc = bp_manager_.flush_page(*frame);
+      }
+      if (rc != RC::SUCCESS) {
+        LOG_ERROR("Failed to evict page %s:%d, due to failed to flush old page. rc=%s", file_name_.c_str(), frame->page_num(), strrc(rc));
+      }
+    }
+    frame_manager_.free(file_desc_, frame->page_num(), frame);
+  }
   return RC::SUCCESS;
 }
 
@@ -488,7 +534,15 @@ RC BufferPoolManager::close_file(const char *_file_name) {
  * TODO [Lab1] 需要同学们实现页面刷盘
  */
 RC BufferPoolManager::flush_page(Frame &frame) {
-  return RC::SUCCESS;
+  std::scoped_lock lock_guard(lock_); // 直接加了一把大锁，其实可以根据访问的页面来细化提高并行度
+  auto iter = fd_buffer_pools_.find(frame.file_desc());
+  if (iter == fd_buffer_pools_.end()) {
+    LOG_ERROR("Failed to flush page, because file desc %d is not found in buffer pool manager.", frame.file_desc());
+    return RC::INTERNAL;
+  }
+
+  auto bp = iter->second; // 根据frame的file_desc找到对应的FileBufferPool
+  return bp->flush_page(frame); // 调用FileBufferPool的flush_page方法来刷盘
 }
 
 static BufferPoolManager *default_bpm = nullptr;
