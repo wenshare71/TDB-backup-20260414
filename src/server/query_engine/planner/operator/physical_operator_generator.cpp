@@ -24,8 +24,13 @@
 #include "include/query_engine/planner/operator/explain_physical_operator.h"
 #include "include/query_engine/planner/node/join_logical_node.h"
 #include "include/query_engine/planner/operator/group_by_physical_operator.h"
+#include "include/query_engine/planner/operator/index_scan_physical_operator.h"
+#include "include/query_engine/structor/expression/comparison_expression.h"
+#include "include/query_engine/structor/expression/field_expression.h"
 #include "common/log/log.h"
+#include "include/storage_engine/index/index.h"
 #include "include/storage_engine/recorder/table.h"
+
 
 using namespace std;
 
@@ -85,31 +90,139 @@ RC PhysicalOperatorGenerator::create_plan(
     TableGetLogicalNode &table_get_oper, unique_ptr<PhysicalOperator> &oper, bool is_delete) {
   vector<unique_ptr<Expression>> &predicates = table_get_oper.predicates();
   Index *index = nullptr;
-  // TODO [Lab2] 生成IndexScanOperator的准备工作,主要包含:
-  // 1. 通过predicates获取具体的值表达式， 目前应该只支持等值表达式的索引查找
-  // example:
-  //  if(predicate.type == ExprType::COMPARE){
-  //   auto compare_expr = dynamic_cast<ComparisonExpr*>(predicate.get());
-  //   if(compare_expr->comp != EQUAL_TO) continue;
-  //   [process]
-  //  }
-  // 2. 对应上面example里的process阶段， 找到等值表达式中对应的FieldExpression和ValueExpression(左值和右值)
-  // 通过FieldExpression找到对应的Index, 通过ValueExpression找到对应的Value
+  Table *table = table_get_oper.table();
 
-  if (index == nullptr) {
-    Table *table = table_get_oper.table();
+  
+  Value left_value;
+  Value right_value;
+  bool left_inclusive = false;
+  bool right_inclusive = false;
+  bool has_left = false;   
+  bool has_right = false;  
+
+  for (const auto &predicate : predicates) {
+    if (predicate->type() != ExprType::COMPARISON) {
+      continue;
+    }
+
+    auto *comparison_expr = static_cast<ComparisonExpr *>(predicate.get());
+    CompOp comp = comparison_expr->comp();
+
+    
+    if (comp != EQUAL_TO && comp != LESS_THAN && comp != LESS_EQUAL &&
+        comp != GREAT_THAN && comp != GREAT_EQUAL) {
+      continue;
+    }
+
+    
+    Expression *field_side = nullptr;
+    Expression *value_side = nullptr;
+    bool field_on_left = false;
+
+    if (comparison_expr->left()->type() == ExprType::FIELD) {
+      field_side = comparison_expr->left().get();
+      value_side = comparison_expr->right().get();
+      field_on_left = true;
+    } else if (comparison_expr->right()->type() == ExprType::FIELD) {
+      field_side = comparison_expr->right().get();
+      value_side = comparison_expr->left().get();
+      field_on_left = false;
+    } else {
+      continue;
+    }
+
+    auto *field_expr = static_cast<FieldExpr *>(field_side);
+    if (field_expr->field().table() != table) {
+      continue;
+    }
+
+    Value value;
+    RC rc = value_side->try_get_value(value);
+    if (rc != RC::SUCCESS || value.is_null()) {
+      continue;
+    }
+
+    
+    Index *field_index = table->find_index_by_field(field_expr->field_name());
+    if (field_index == nullptr) {
+      continue;
+    }
+
+    
+    if (index != nullptr && field_index != index) {
+      continue;
+    }
+    index = field_index;
+
+    CompOp normalized_comp = comp;
+    if (!field_on_left) {
+      switch (comp) {
+        case LESS_THAN:   normalized_comp = GREAT_THAN;  break;
+        case LESS_EQUAL:  normalized_comp = GREAT_EQUAL; break;
+        case GREAT_THAN:  normalized_comp = LESS_THAN;   break;
+        case GREAT_EQUAL: normalized_comp = LESS_EQUAL;  break;
+        default: break;  
+      }
+    }
+
+    switch (normalized_comp) {
+      case EQUAL_TO: {
+        // field = value  =>  [value, value]
+        left_value = value;
+        left_inclusive = true;
+        has_left = true;
+        right_value = value;
+        right_inclusive = true;
+        has_right = true;
+      } break;
+      case GREAT_THAN: {
+        // field > value  =>  (value, +∞)
+        left_value = value;
+        left_inclusive = false;
+        has_left = true;
+      } break;
+      case GREAT_EQUAL: {
+        // field >= value  =>  [value, +∞)
+        left_value = value;
+        left_inclusive = true;
+        has_left = true;
+      } break;
+      case LESS_THAN: {
+        // field < value  =>  (-∞, value)
+        right_value = value;
+        right_inclusive = false;
+        has_right = true;
+      } break;
+      case LESS_EQUAL: {
+        // field <= value  =>  (-∞, value]
+        right_value = value;
+        right_inclusive = true;
+        has_right = true;
+      } break;
+      default: break;
+    }
+
+    if (normalized_comp == EQUAL_TO) {
+      break;
+    }
+  }
+
+  if (index == nullptr || (!has_left && !has_right)) {
     auto table_scan_oper = new TableScanPhysicalOperator(table, table_get_oper.table_alias(), table_get_oper.readonly());
     table_scan_oper->isdelete_ = is_delete;
     table_scan_oper->set_predicates(std::move(predicates));
     oper = unique_ptr<PhysicalOperator>(table_scan_oper);
     LOG_TRACE("use table scan");
   } else {
-    // TODO [Lab2] 生成IndexScanOperator, 并放置在算子树上，下面是一个实现参考，具体实现可以根据需要进行修改
-    // IndexScanner 在设计时，考虑了范围查找索引的情况，但此处我们只需要考虑单个键的情况
-    // const Value &value = value_expression->get_value();
-    // IndexScanPhysicalOperator *operator =
-    //              new IndexScanPhysicalOperator(table, index, readonly, &value, true, &value, true);
-    // oper = unique_ptr<PhysicalOperator>(operator);
+    const Value *left_ptr = has_left ? &left_value : nullptr;
+    const Value *right_ptr = has_right ? &right_value : nullptr;
+    auto *index_scan_oper = new IndexScanPhysicalOperator(
+        table, index, table_get_oper.readonly(), left_ptr, left_inclusive, right_ptr, right_inclusive);
+    index_scan_oper->isdelete_ = is_delete;
+    index_scan_oper->set_table_alias(table_get_oper.table_alias());
+    index_scan_oper->set_predicates(std::move(predicates));
+    oper = unique_ptr<PhysicalOperator>(index_scan_oper);
+    LOG_TRACE("use index scan. index=%s", index->index_meta().name());
   }
 
   return RC::SUCCESS;

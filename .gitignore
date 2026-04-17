@@ -8,6 +8,7 @@
 /local
 /my
 CLAUDE.md
-
+*.log
+*.log.*
 /lab*
 *.zip

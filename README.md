@@ -34,7 +34,7 @@ bash build.sh --make -j4
 - 基于TCP运行的Client-Service架构
 数据库管理系统的经典CS架构，需要首先启动一个服务作为server，之后通过client来访问server。
 ```shell
-./bin/server -f -p 8888
+./bin/server -f ../config/serverConfig.ini -p 8888
 ```
 之后新开一个终端启动client，就可以进入TDB cli交互界面
  ```shell
@@ -43,7 +43,7 @@ bash build.sh --make -j4
 - 无状态服务的启动
 除了CS架构，TDB还支持无状态的单线程服务启动（类似于SqlLite），通过单独的指令就可以启动
 ```
-./bin/server -f -P cli
+./bin/server -f ../config/serverConfig.ini -P cli
 ```
 完成TDB的启动后，就可以在TDB的交互窗口运行SQL了。
 

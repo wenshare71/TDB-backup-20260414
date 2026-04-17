@@ -1,5 +1,6 @@
 #include "include/storage_engine/index/bplus_tree_index.h"
 
+
 BplusTreeIndex::~BplusTreeIndex() noexcept {
   close();
 }
@@ -85,8 +86,23 @@ RC BplusTreeIndex::close() {
  * 注意如果是唯一索引（unique），需要判断是否存在重复的字段值，如果有，返回RECORD_DUPLICATE_KEY，插入失败。
  */
 RC BplusTreeIndex::insert_entry(const char *record, const RID *rid) {
-  // TODO [Lab2] 增加索引项的处理逻辑
-  return RC::SUCCESS;
+  if (record == nullptr || rid == nullptr) {
+    return RC::INVALID_ARGUMENT;
+  }
+
+  int key_num = multi_field_metas_.size();
+  const char *multi_keys[key_num];
+  for (int i = 0; i < key_num; i++) {
+    multi_keys[i] = record + multi_field_metas_[i].offset();
+  }
+  if (index_meta_.is_unique()) {
+    std::list<RID> rids;
+    RC rc = index_handler_.get_entry(multi_keys, rids, key_num);
+    if (rc == RC::SUCCESS && !rids.empty()) {
+      return RC::RECORD_DUPLICATE_KEY;
+    }
+  } 
+  return index_handler_.insert_entry(multi_keys, rid, key_num);
 }
 
 /**
@@ -94,8 +110,16 @@ RC BplusTreeIndex::insert_entry(const char *record, const RID *rid) {
  * 需要调用BplusTreeHandler的delete_entry完成插入操作。
  */
 RC BplusTreeIndex::delete_entry(const char *record, const RID *rid) {
-  // TODO [Lab2] 增加索引项的处理逻辑
-  return RC::SUCCESS;
+  if (record == nullptr || rid == nullptr) {
+    return RC::INVALID_ARGUMENT;
+  }
+
+  int key_num = multi_field_metas_.size();
+  const char *multi_keys[key_num];
+  for (int i = 0; i < key_num; i++) {
+    multi_keys[i] = record + multi_field_metas_[i].offset();
+  }
+  return index_handler_.delete_entry(multi_keys, rid, key_num);
 }
 
 IndexScanner *BplusTreeIndex::create_scanner(

@@ -4,6 +4,7 @@
 #include "include/storage_engine/index/bplus_tree_index.h"
 #include <random>
 
+
 Table::~Table() {
   if (record_handler_ != nullptr) {
     delete record_handler_;
@@ -364,16 +365,30 @@ RC Table::insert_record(Record &record) {
     LOG_ERROR("Insert record failed. table name=%s, rc=%s", table_meta_.name(), strrc(rc));
     return rc;
   }
-
-  // TODO [Lab2] 增加索引的处理逻辑
-
+  rc = insert_entry_of_indexes(record.data(), record.rid());
+  if (rc != RC::SUCCESS) {
+    RC rc2 = delete_entry_of_indexes(record.data(), record.rid(), false /*error_on_not_exists*/);
+    if (rc2 != RC::SUCCESS) {
+      LOG_ERROR("Failed to delete entry of indexes when rollbacking after failed to insert entry of indexes. table=%s, rid=%s, rc2=%s",
+                name(), record.rid().to_string().c_str(), strrc(rc2));
+    }
+    rc2 = record_handler_->delete_record(&record.rid());
+    if (rc2 != RC::SUCCESS) {
+      LOG_PANIC("Failed to delete record when rollbacking after failed to insert entry of indexes. table=%s, rid=%s, rc2=%s",
+                name(), record.rid().to_string().c_str(), strrc(rc2)); // 用户插入失败，但是系统无法撤销
+    }
+  }
   return rc;
 }
 
 RC Table::delete_record(const Record &record) {
   RC rc = RC::SUCCESS;
 
-  // TODO [Lab2] 增加索引的处理逻辑
+  rc = delete_entry_of_indexes(record.data(), record.rid(), true /*error_on_not_exists*/);
+  if (rc != RC::SUCCESS) {
+    LOG_ERROR("Delete record from indexes failed. table name=%s, rc=%s", table_meta_.name(), strrc(rc));
+    return rc;
+  }
 
   rc = record_handler_->delete_record(&record.rid());
   return rc;
